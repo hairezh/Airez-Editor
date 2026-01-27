@@ -1,1 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hairez Fade</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
+<style>
+:root{
+  --bg:#0b0c0f;
+  --fg:#e8e8e8;
+  --muted:#7a7a7a;
+  --border:rgba(255,255,255,.08);
+  --panel:rgba(255,255,255,.03);
+
+  --fs:15px;
+  --lh:1.6;
+  --pad:14px;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--fg);
+  font: var(--fs)/var(--lh) ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  height:100vh;
+}
+
+.app{
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+}
+
+/* Top bar */
+.topbar{
+  position:sticky;
+  top:0;
+  z-index:10;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:8px 10px;
+  border-bottom:1px solid var(--border);
+  background: linear-gradient(180deg, rgba(0,0,0,.35), rgba(0,0,0,.15)), var(--panel);
+}
+
+.controls{
+  display:flex;
+  gap:6px;
+  align-items:center;
+}
+
+.box{
+  padding:6px 10px;
+  border:1px solid var(--border);
+  border-radius:6px;
+  background:rgba(0,0,0,.18);
+  color:var(--muted);
+  font-size:12px;
+}
+
+.btn{
+  cursor:pointer;
+  padding:6px 10px;
+  border-radius:6px;
+  border:1px solid var(--border);
+  background:rgba(0,0,0,.25);
+  color:var(--muted);
+  font-weight:600;
+}
+.btn:hover{
+  color:var(--fg);
+  border-color:rgba(255,255,255,.18);
+}
+
+/* Notepad area */
+.pad{
+  flex:1;
+  display:flex;
+  min-height:0;
+}
+
+/* Line numbers */
+.lines{
+  border-right:1px solid var(--border);
+  user-select:none;
+  min-width:46px;
+  overflow:hidden;
+  color:var(--muted);
+}
+.linesInner{
+  padding: var(--pad) 8px;
+  white-space:pre;
+  text-align:right;
+  font: inherit;
+  line-height: var(--lh);
+}
+
+/* Editor stack: textarea (input) + overlay (rendered) */
+.editorWrap{
+  flex:1;
+  position:relative;
+  min-height:0;
+}
+
+textarea{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  resize:none;
+  border:none;
+  outline:none;
+
+  /* match the overlay exactly */
+  padding: var(--pad);
+  font: inherit;
+  line-height: var(--lh);
+  background: transparent;
+
+  /* important trick: user types here, but we show overlay */
+  color: transparent;          /* hide raw text */
+  caret-color: #fff;           /* keep caret visible */
+  -webkit-text-fill-color: transparent;
+}
+
+textarea::selection{
+  /* selection visible even if text is transparent */
+  background: rgba(255,255,255,.18);
+}
+
+.overlay{
+  position:absolute;
+  inset:0;
+  overflow:auto;
+  padding: var(--pad);
+  font: inherit;
+  line-height: var(--lh);
+  white-space:pre-wrap;
+  word-break:break-word;
+  pointer-events:none; /* clicks go to textarea */
+}
+
+.overlay:empty::before{
+  content:"Write here… old text fades (Ctrl+A reveals everything).";
+  color:rgba(232,232,232,.25);
+}
+
+.t{ transition: opacity 110ms linear; }
+</style>
+</head>
+
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="controls">
+      <button class="btn" id="toggleFade">Fade: ON</button>
+      <button class="btn" id="exportTxt">Export</button>
+      <button class="btn" id="clear">Clear</button>
+    </div>
+
+    <div class="controls">
+      <div class="box" id="charCount">Chars: 0</div>
+      <div class="box" id="lineCount">Lines: 1</div>
+    </div>
+  </div>
+
+  <div class="pad">
+    <div class="lines"><div id="linesInner" class="linesInner">1</div></div>
+
+    <div class="editorWrap">
+      <div id="overlay" class="overlay"></div>
+      <textarea id="input" spellcheck="false"></textarea>
+    </div>
+  </div>
+</div>
+
+<script>
+const input = document.getElementById("input");
+const overlay = document.getElementById("overlay");
+const linesInner = document.getElementById("linesInner");
+
+const charCountEl = document.getElementById("charCount");
+const lineCountEl = document.getElementById("lineCount");
+
+const toggleFadeBtn = document.getElementById("toggleFade");
+const exportBtn = document.getElementById("exportTxt");
+const clearBtn = document.getElementById("clear");
+
+let fadeEnabled = true;
+let fadeWindow = 28;
+let minOpacity = 0.06;
+let ctrlAReveal = false;
+
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+
+function tokenize(text){
+  return text.match(/[\p{L}\p{N}]+|[^\p{L}\p{N}]+/gu) || [""];
+}
+function escapeHTML(s){
+  return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+}
+function isWord(tok){ return /^[\p{L}\p{N}]+$/u.test(tok); }
+function isSpace(tok){ return /^\s+$/.test(tok); }
+
+function caretWordIndex(text, caretPos){
+  const tokens = tokenize(text);
+  let chars=0, w=0;
+  for(const t of tokens){
+    const next = chars + t.length;
+    if(caretPos <= next) return Math.max(0, w - 1);
+    if(isWord(t)) w++;
+    chars = next;
+  }
+  return Math.max(0, w - 1);
+}
+
+function updateStats(text){
+  const chars = text.length;
+  const lines = text.split("\n").length;
+
+  charCountEl.textContent = `Chars: ${chars}`;
+  lineCountEl.textContent = `Lines: ${lines}`;
+
+  let out = "";
+  for(let i=1;i<=lines;i++) out += i + "\n";
+  linesInner.textContent = out || "1";
+}
+
+function render(){
+  const text = input.value.replace(/\r/g,"");
+  const caretPos = input.selectionStart ?? 0;
+
+  updateStats(text);
+
+  const doFade = fadeEnabled && !ctrlAReveal;
+  const caretWord = caretWordIndex(text, caretPos);
+
+  const tokens = tokenize(text);
+  let html = "";
+  let w = 0;
+
+  for(const tok of tokens){
+    const safe = escapeHTML(tok);
+
+    if(!doFade || isSpace(tok)){
+      html += safe;
+    }else{
+      // fade everything that's not pure whitespace (words + punctuation + symbols)
+      const diff = caretWord - w;
+      const op = clamp(1 - diff / fadeWindow, minOpacity, 1);
+      html += `<span class="t" style="opacity:${op}">${safe}</span>`;
+    }
+
+    if(isWord(tok)) w++;
+  }
+
+  overlay.innerHTML = html;
+  // keep overlay scroll synced
+  overlay.scrollTop = input.scrollTop;
+  overlay.scrollLeft = input.scrollLeft;
+  // line numbers follow vertical scroll
+  // (we only need vertical; but this keeps it stable)
+  linesInner.parentElement.scrollTop = input.scrollTop;
+}
+
+/* scroll sync */
+input.addEventListener("scroll", ()=>{
+  overlay.scrollTop = input.scrollTop;
+  overlay.scrollLeft = input.scrollLeft;
+  linesInner.parentElement.scrollTop = input.scrollTop;
+});
+
+/* typing */
+input.addEventListener("input", render);
+input.addEventListener("click", render);
+input.addEventListener("keyup", render);
+
+toggleFadeBtn.addEventListener("click", ()=>{
+  fadeEnabled = !fadeEnabled;
+  toggleFadeBtn.textContent = `Fade: ${fadeEnabled ? "ON" : "OFF"}`;
+  render();
+});
+
+clearBtn.addEventListener("click", ()=>{
+  input.value = "";
+  ctrlAReveal = false;
+  render();
+  input.focus();
+});
+
+exportBtn.addEventListener("click", ()=>{
+  const text = input.value.replace(/\r/g, "");
+  if(!text.trim()) return;
+
+  const blob = new Blob([text], { type:"text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "hairez.txt";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+/* Ctrl+A reveals everything while selection is active */
+document.addEventListener("keydown", e=>{
+  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="a" && document.activeElement===input){
+    ctrlAReveal = true;
+    render();
+  }
+});
+document.addEventListener("selectionchange", ()=>{
+  if(document.activeElement!==input) return;
+  const collapsed = (input.selectionStart === input.selectionEnd);
+  if(collapsed && ctrlAReveal){
+    ctrlAReveal = false;
+    render();
+  }
+});
+
+// init
+render();
+</script>
+</body>
+</html>
