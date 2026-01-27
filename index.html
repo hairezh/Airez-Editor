@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Hairez Fade</title>
+<title>Hairez</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
@@ -50,6 +50,7 @@ body{
   display:flex;
   gap:6px;
   align-items:center;
+  flex-wrap:wrap;
 }
 
 .box{
@@ -73,6 +74,46 @@ body{
 .btn:hover{
   color:var(--fg);
   border-color:rgba(255,255,255,.18);
+}
+.btn.danger:hover{
+  border-color:rgba(255,120,120,.35);
+  color:rgba(255,210,210,.95);
+}
+
+.note{
+  color:rgba(232,232,232,.38);
+  font-size:12px;
+  border:1px solid var(--border);
+  background:rgba(0,0,0,.12);
+  border-radius:6px;
+  padding:6px 10px;
+}
+
+/* Restored banner */
+.banner{
+  display:none;
+  border-bottom:1px solid var(--border);
+  background: rgba(255,255,255,.03);
+  padding:8px 10px;
+  font-size:12px;
+  color:rgba(232,232,232,.70);
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+.banner.show{ display:flex; }
+.banner .left{
+  display:flex;
+  gap:10px;
+  align-items:center;
+  flex-wrap:wrap;
+}
+.badge{
+  border:1px solid var(--border);
+  border-radius:6px;
+  padding:4px 8px;
+  color:rgba(232,232,232,.75);
+  background: rgba(0,0,0,.16);
 }
 
 /* Notepad area */
@@ -114,20 +155,18 @@ textarea{
   border:none;
   outline:none;
 
-  /* match the overlay exactly */
   padding: var(--pad);
   font: inherit;
   line-height: var(--lh);
   background: transparent;
 
-  /* important trick: user types here, but we show overlay */
-  color: transparent;          /* hide raw text */
-  caret-color: #fff;           /* keep caret visible */
+  /* user types here, overlay shows text */
+  color: transparent;
+  caret-color: #fff;
   -webkit-text-fill-color: transparent;
 }
 
 textarea::selection{
-  /* selection visible even if text is transparent */
   background: rgba(255,255,255,.18);
 }
 
@@ -140,11 +179,11 @@ textarea::selection{
   line-height: var(--lh);
   white-space:pre-wrap;
   word-break:break-word;
-  pointer-events:none; /* clicks go to textarea */
+  pointer-events:none;
 }
 
 .overlay:empty::before{
-  content:"Write here… old text fades (Ctrl+A reveals everything).";
+  content:"Write here… old text fades.";
   color:rgba(232,232,232,.25);
 }
 
@@ -158,13 +197,24 @@ textarea::selection{
     <div class="controls">
       <button class="btn" id="toggleFade">Fade: ON</button>
       <button class="btn" id="exportTxt">Export</button>
-      <button class="btn" id="clear">Clear</button>
+      <button class="btn danger" id="clearWipe">Clear (wipe)</button>
     </div>
 
     <div class="controls">
       <div class="box" id="charCount">Chars: 0</div>
       <div class="box" id="lineCount">Lines: 1</div>
+      <div class="note" title="Autosave uses your browser storage. No uploads.">
+        Local-only autosave (no uploads)
+      </div>
     </div>
+  </div>
+
+  <div id="banner" class="banner">
+    <div class="left">
+      <span class="badge">Restored</span>
+      <span>Recovered from local autosave.</span>
+    </div>
+    <button class="btn" id="dismissBanner" type="button">Dismiss</button>
   </div>
 
   <div class="pad">
@@ -178,6 +228,8 @@ textarea::selection{
 </div>
 
 <script>
+const STORAGE_KEY = "hairez_state_v2"; // stores text + caret + scroll
+
 const input = document.getElementById("input");
 const overlay = document.getElementById("overlay");
 const linesInner = document.getElementById("linesInner");
@@ -187,12 +239,14 @@ const lineCountEl = document.getElementById("lineCount");
 
 const toggleFadeBtn = document.getElementById("toggleFade");
 const exportBtn = document.getElementById("exportTxt");
-const clearBtn = document.getElementById("clear");
+const clearWipeBtn = document.getElementById("clearWipe");
+
+const banner = document.getElementById("banner");
+const dismissBannerBtn = document.getElementById("dismissBanner");
 
 let fadeEnabled = true;
 let fadeWindow = 28;
 let minOpacity = 0.06;
-let ctrlAReveal = false;
 
 const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
 
@@ -229,13 +283,40 @@ function updateStats(text){
   linesInner.textContent = out || "1";
 }
 
+/* Autosave (debounced) */
+let saveTimer = null;
+function scheduleSave(){
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const state = {
+      text: input.value.replace(/\r/g,""),
+      selStart: input.selectionStart ?? 0,
+      selEnd: input.selectionEnd ?? 0,
+      scrollTop: input.scrollTop ?? 0,
+      scrollLeft: input.scrollLeft ?? 0,
+      t: Date.now()
+    };
+    try{
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }catch(e){
+      // ignore silently (quota/private mode)
+    }
+  }, 250);
+}
+
+function syncScroll(){
+  overlay.scrollTop = input.scrollTop;
+  overlay.scrollLeft = input.scrollLeft;
+  linesInner.parentElement.scrollTop = input.scrollTop;
+}
+
 function render(){
   const text = input.value.replace(/\r/g,"");
   const caretPos = input.selectionStart ?? 0;
 
   updateStats(text);
 
-  const doFade = fadeEnabled && !ctrlAReveal;
+  const doFade = fadeEnabled;
   const caretWord = caretWordIndex(text, caretPos);
 
   const tokens = tokenize(text);
@@ -248,7 +329,6 @@ function render(){
     if(!doFade || isSpace(tok)){
       html += safe;
     }else{
-      // fade everything that's not pure whitespace (words + punctuation + symbols)
       const diff = caretWord - w;
       const op = clamp(1 - diff / fadeWindow, minOpacity, 1);
       html += `<span class="t" style="opacity:${op}">${safe}</span>`;
@@ -258,22 +338,12 @@ function render(){
   }
 
   overlay.innerHTML = html;
-  // keep overlay scroll synced
-  overlay.scrollTop = input.scrollTop;
-  overlay.scrollLeft = input.scrollLeft;
-  // line numbers follow vertical scroll
-  // (we only need vertical; but this keeps it stable)
-  linesInner.parentElement.scrollTop = input.scrollTop;
+  syncScroll();
+  scheduleSave();
 }
 
-/* scroll sync */
-input.addEventListener("scroll", ()=>{
-  overlay.scrollTop = input.scrollTop;
-  overlay.scrollLeft = input.scrollLeft;
-  linesInner.parentElement.scrollTop = input.scrollTop;
-});
-
-/* typing */
+/* events */
+input.addEventListener("scroll", syncScroll);
 input.addEventListener("input", render);
 input.addEventListener("click", render);
 input.addEventListener("keyup", render);
@@ -284,9 +354,10 @@ toggleFadeBtn.addEventListener("click", ()=>{
   render();
 });
 
-clearBtn.addEventListener("click", ()=>{
+clearWipeBtn.addEventListener("click", ()=>{
   input.value = "";
-  ctrlAReveal = false;
+  try{ localStorage.removeItem(STORAGE_KEY); }catch(e){}
+  banner.classList.remove("show");
   render();
   input.focus();
 });
@@ -307,24 +378,48 @@ exportBtn.addEventListener("click", ()=>{
   URL.revokeObjectURL(url);
 });
 
-/* Ctrl+A reveals everything while selection is active */
-document.addEventListener("keydown", e=>{
-  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="a" && document.activeElement===input){
-    ctrlAReveal = true;
-    render();
-  }
-});
-document.addEventListener("selectionchange", ()=>{
-  if(document.activeElement!==input) return;
-  const collapsed = (input.selectionStart === input.selectionEnd);
-  if(collapsed && ctrlAReveal){
-    ctrlAReveal = false;
-    render();
-  }
+dismissBannerBtn.addEventListener("click", ()=>{
+  banner.classList.remove("show");
 });
 
-// init
-render();
+/* Restore on load */
+(function restore(){
+  let raw = null;
+  try{ raw = localStorage.getItem(STORAGE_KEY); }catch(e){}
+
+  if(!raw) { render(); return; }
+
+  try{
+    const state = JSON.parse(raw);
+    if(state && typeof state.text === "string" && state.text.length){
+      input.value = state.text;
+
+      // Render first, then restore scroll + selection on next frame
+      render();
+
+      requestAnimationFrame(() => {
+        input.scrollTop = state.scrollTop || 0;
+        input.scrollLeft = state.scrollLeft || 0;
+
+        const len = input.value.length;
+        const s = Math.max(0, Math.min(state.selStart ?? 0, len));
+        const e = Math.max(0, Math.min(state.selEnd ?? s, len));
+        try{ input.setSelectionRange(s, e); }catch(_){}
+
+        syncScroll();
+      });
+
+      banner.classList.add("show");
+      return;
+    }
+  }catch(e){}
+
+  // fallback
+  render();
+})();
+
+// focus for usability
+input.focus();
 </script>
 </body>
 </html>
